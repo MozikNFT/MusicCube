@@ -1,4 +1,4 @@
-####  1, FA2 NFT 
+####  1, FA2 NFT contract
  address: KT1Nqrmo5815o1wUcPqSjKk4HLMVy6VDRdo8
  
  to view storage detail：
