@@ -48,7 +48,7 @@ NFT assets list on the market,anyone select one ,and  add to their cart and exch
 
 # 2. Key Process
 
-![1.overal process](.\res\1.overal process.png)
+![1.overal process](..\Doc\1.overal process.png)
 
 ## 2.1 openAuction
 
@@ -65,7 +65,7 @@ NFT assets list on the market,anyone select one ,and  add to their cart and exch
 
 **process:**
 
-![2. Open Auction](.\res\2. Open Auction.png)
+![2. Open Auction](..\Doc\2. Open Auction.png)
 
 ## 2.2 englishBidding
 
@@ -84,7 +84,7 @@ note: if the buyer send the valid currentRSAPublicKey, the seller will delivery 
 
 **process:**
 
-![3. EnglishBidding](.\res\3. EnglishBidding.png)
+![3. EnglishBidding](..\Doc\3. EnglishBidding.png)
 
 ## 2.3 closeAuctionWithDelivery
 
@@ -103,7 +103,7 @@ If no bidder,just close the auciton.
 
 **process:**
 
-![4. closeAuctionwithdelivery](.\res\4. closeAuctionwithdelivery.png)
+![4. closeAuctionwithdelivery](..\Doc\4. closeAuctionwithdelivery.png)
 
 # 3. High Light
 
