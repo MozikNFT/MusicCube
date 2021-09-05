@@ -50,6 +50,8 @@ NFT assets list on the market,anyone select one ,and  add to their cart and exch
 
 ![1.overal process](..\Doc\1.overal process.png)
 
+![1.overal process](https://github.com/MozikNFT/MusicCube/blob/main/Doc/1.overal%20process.png)
+
 ## 2.1 openAuction
 
 **description:**
@@ -66,6 +68,7 @@ NFT assets list on the market,anyone select one ,and  add to their cart and exch
 **process:**
 
 ![2. Open Auction](..\Doc\2. Open Auction.png)
+![2. Open Auction](https://github.com/MozikNFT/MusicCube/blob/main/Doc/2.%20Open%20Auction.png)
 
 ## 2.2 englishBidding
 
@@ -86,6 +89,8 @@ note: if the buyer send the valid currentRSAPublicKey, the seller will delivery 
 
 ![3. EnglishBidding](..\Doc\3. EnglishBidding.png)
 
+![3. EnglishBidding](https://github.com/MozikNFT/MusicCube/blob/main/Doc/3.%20EnglishBidding.png)
+
 ## 2.3 closeAuctionWithDelivery
 
 **description:**
@@ -104,6 +109,7 @@ If no bidder,just close the auciton.
 **process:**
 
 ![4. closeAuctionwithdelivery](..\Doc\4. closeAuctionwithdelivery.png)
+![4. closeAuctionwithdelivery](https://github.com/MozikNFT/MusicCube/blob/main/Doc/4.%20closeAuctionwithdelivery.png)
 
 # 3. High Light
 
