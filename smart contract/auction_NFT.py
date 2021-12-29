@@ -129,6 +129,7 @@ class Error_message:
     def __init__(self, config):
         self.config = config
         self.prefix = "FA2_"
+        
     def make(self, s): return (self.prefix + s)
     def token_undefined(self):       return self.make("TOKEN_UNDEFINED")
     def insufficient_balance(self):  return self.make("INSUFFICIENT_BALANCE")
@@ -364,6 +365,9 @@ class FA2_core(sp.Contract):
             operators = self.operator_set.make(),
             all_tokens = self.token_id_set.empty(),
             metadata = metadata,
+            recording_right=config.my_map(tkey=sp.TNat, tvalue=sp.TAddress),
+            propagating_right=config.my_map(tkey=sp.TNat, tvalue=sp.TAddress),
+            other_rights=config.my_map(tkey=sp.TNat, tvalue=sp.TAddress),
             **extra_storage
         )
 
@@ -540,6 +544,11 @@ class FA2_mint(FA2_core):
                 token_info  = params.metadata
             )
             self.data.total_supply[params.token_id] = params.amount
+        # approve all right   
+        self.data.recording_right[params.token_id] = params.address
+        self.data.propagating_right[params.token_id] = params.address
+        self.data.other_rights[params.token_id] = params.address
+
 
 class FA2_token_metadata(FA2_core):
     def set_token_metadata_view(self):
@@ -582,8 +591,126 @@ class FA2_token_metadata(FA2_core):
                 token_info  = metadata ) 
             return
 
+class FA2_right(FA2_core):
+    @sp.entry_point
+    def transfer(self, params):
+        sp.verify( ~self.is_paused(), message = self.error_message.paused() )
+        sp.set_type(params, self.batch_transfer.get_type())
+        sp.for transfer in params:
+           current_from = transfer.from_
+           sp.for tx in transfer.txs:
+                if self.config.single_asset:
+                    sp.verify(tx.token_id == 0, message = "single-asset: token-id <> 0")
 
-class FA2(FA2_change_metadata, FA2_token_metadata, FA2_mint, FA2_administrator, FA2_pause, FA2_core):
+                sender_verify = ((self.is_administrator(sp.sender)) |
+                                (current_from == sp.sender))
+                message = self.error_message.not_owner()
+                if self.config.support_operator:
+                    message = self.error_message.not_operator()
+                    sender_verify |= (self.operator_set.is_member(self.data.operators,
+                                                                  current_from,
+                                                                  sp.sender,
+                                                                  tx.token_id))
+                if self.config.allow_self_transfer:
+                    sender_verify |= (sp.sender == sp.self_address)
+                sp.verify(sender_verify, message = message)
+                sp.verify(
+                    self.data.token_metadata.contains(tx.token_id),
+                    message = self.error_message.token_undefined()
+                )
+                # If amount is 0 we do nothing now:
+                sp.if (tx.amount > 0):
+                    from_user = self.ledger_key.make(current_from, tx.token_id)
+                    sp.verify(
+                        (self.data.ledger[from_user].balance >= tx.amount),
+                        message = self.error_message.insufficient_balance())
+                    to_user = self.ledger_key.make(tx.to_, tx.token_id)
+                    self.data.ledger[from_user].balance = sp.as_nat(
+                        self.data.ledger[from_user].balance - tx.amount)
+                    sp.if self.data.ledger.contains(to_user):
+                        self.data.ledger[to_user].balance += tx.amount
+                    sp.else:
+                         self.data.ledger[to_user] = Ledger_value.make(tx.amount)
+                     # approve all right
+                    sp.verify((self.data.recording_right[tx.token_id] == current_from) &
+                            (self.data.propagating_right[tx.token_id] == current_from) &
+                            (self.data.other_rights[tx.token_id] == current_from), message="NO ALL RIGHT")
+                    self.data.recording_right[tx.token_id] = tx.to_
+                    self.data.propagating_right[tx.token_id] = tx.to_
+                    self.data.other_rights[tx.token_id] = tx.to_
+                sp.else:
+                    pass
+
+    @sp.entry_point
+    def transferRecordingRight(self, params):
+        # only administrator can change or owner token metatdata, check first
+        sp.verify((sp.sender == self.data.administrator) | (self.data.recording_right[params.token_id] == sp.sender),
+                  message=self.error_message.not_admin_or_operator())
+        self.data.recording_right[params.token_id] = params.address
+
+
+    @sp.entry_point
+    def transferPropagatingRight(self, params):
+        # only administrator can change or owner token metatdata, check first
+        user = self.ledger_key.make(sp.sender, params.token_id)
+        isOwner = False
+        sp.if self.data.ledger.contains(user):
+             isOwner = self.data.ledger[user].balance > 0
+
+        sp.verify((sp.sender == self.data.administrator) | (self.data.propagating_right[params.token_id] == sp.sender) | isOwner,
+                  message=self.error_message.not_admin_or_operator())
+        self.data.propagating_right[params.token_id] = params.address
+
+
+    @sp.entry_point
+    def transferOtherRightsRight(self, params):
+        # only administrator can change or owner token metatdata, check first
+        user = self.ledger_key.make(sp.sender, params.token_id)
+        isOwner = False
+        sp.if self.data.ledger.contains(user):
+            isOwner = self.data.ledger[user].balance > 0
+
+        sp.verify((sp.sender == self.data.administrator) | (self.data.other_rights[params.token_id] == sp.sender) | isOwner,
+                  message=self.error_message.not_admin_or_operator())
+        self.data.other_rights[params.token_id] = params.address
+
+
+    @sp.entry_point
+    def transferAllRight(self, params):
+        # only administrator can change or owner token metatdata, check first
+        user = self.ledger_key.make(sp.sender, params.token_id)
+        isOwner = False
+        sp.if self.data.ledger.contains(user):
+            isOwner = self.data.ledger[user].balance > 0
+
+        sp.verify((sp.sender == self.data.administrator) | isOwner,
+                  message=self.error_message.not_admin_or_operator())
+
+        self.data.recording_right[params.token_id] = params.recordingRightAddress
+        self.data.propagating_right[params.token_id] = params.propagatingRightAddress
+        self.data.other_rights[params.token_id] = params.otherRightsAddress
+
+
+    def getRecordingRight(self, params):
+        # sp.verify(~self.is_administrator(sp.sender) & self.data.recording_right.set[params.token_id] != sp.sender,
+        #           message=self.error_message.not_admin_or_operator())
+        sp.result(self.data.recording_right[params.token_id])
+
+
+    def getPropagatingRight(self, params):
+        # sp.verify(~self.is_administrator(sp.sender) & self.data.recording_right.set[params.token_id] != sp.sender,
+        #           message=self.error_message.not_admin_or_operator())
+        sp.result(self.data.propagating_right[params.token_id])
+
+
+    def getRightsRight(self, params):
+        # sp.verify(~self.is_administrator(sp.sender) & self.data.recording_right.set[params.token_id] != sp.sender,
+        #           message=self.error_message.not_admin_or_operator())
+        sp.result(self.data.other_rights[params.token_id])
+
+
+
+class FA2(FA2_change_metadata, FA2_token_metadata, FA2_mint, FA2_administrator, FA2_pause, FA2_right, FA2_core):
 
     @sp.offchain_view(pure = True)
     def count_tokens(self):
@@ -738,15 +865,74 @@ class  NftAuctionMarket(sp.Contract):
                 EncryptedSrcUrl  = sp.TString,
                 #status = sp.TBounded(["Initial", "Bidding", "Ended"])
                 status = sp.TVariant(status = sp.TString)                
-                ) ),
-        ))
+            ) ),
+
+            ## fans donation records
+            #key variable：recordNO, authorID, tokenID, sponsorAddr,endTime - donation end time, 
+            # donationValue - donation total value record, withdrawableValue - the amount which the author can withdraw.
+            # Map(donatorNo. [donatorAddr, donatorValue, donatorTime, donationID]) - any one can donate more can one time.
+            # donationID的规则：TEZOS-recordNO-authorID-tokenID-donatorAddr-donatorValue-donatorTime     
+            donationRecordsMap = sp.TMap(sp.TNat, sp.TRecord(     
+                    authorID = sp.TNat,
+                    tokenID = sp.TNat,
+                    sponsorAddr = sp.TAddress,
+                    endTime = sp.TTimestamp,
+                    donationValue = sp.TMutez,
+                    withdrawableValue = sp.TMutez,
+                    donatorMap =  sp.TMap(sp.TNat, sp.TRecord(
+                            donatorAddr = sp.TAddress,
+                            donatorValue = sp.TMutez,
+                            donatorTime = sp.TTimestamp,
+                            donationID = sp.TString
+                    ) ),
+            ) ),
+
+            ## Fans participation for voting records
+            ## voteMap key valuable: recordNO, authorID, tokenID, totalNum, Map(voterAddr,voteNum)
+            voteRecordsMap = sp.TMap(sp.TNat, sp.TRecord(    
+                        authorID = sp.TNat,
+                        tokenID = sp.TNat,
+                        beginTime = sp.TTimestamp,
+                        endTime = sp.TTimestamp,
+                        totalNum  = sp.TNat,
+                        votersMap =  sp.TMap(sp.TAddress,sp.TNat)
+            ) ),
+
+            ## Ranking and selection mechanism
+            # rankingMap key valuable: tokenID, volume, 
+            # sellers(address, num) - be seller times, buyers(address, bool) - be buyer times
+            rankingMaps = sp.TMap(sp.TNat, sp.TRecord(    
+                    volume =  sp.TMutez,
+                    sellers = sp.TMap(sp.TAddress,sp.TNat),
+                    buyers = sp.TMap(sp.TAddress,sp.TNat)
+            ) ),
+
+            ## IP assets protection
+            #  IP assets protection as DCI certification: tokenID, DCI, registerID, worksName, worksType, authorName, 
+            # finishedDate, firstPublishedDate, registeredDate
+            ipAssetsCert = sp.TMap(sp.TNat, sp.TRecord(    
+                    DCI =   sp.TString,
+                    registerID = sp.TString,
+                    worksName = sp.TString,
+                    worksType = sp.TString,
+                    authorName = sp.TString,
+                    finishedDate = sp.TString,
+                    firstPublishedDate = sp.TString,
+                    registeredDate = sp.TString
+            ) ),   
+
+        ) )
 
         # Initialize the contract storage
         self.init(
             administrator = _admin,
             nftContractAddress = _nftAddress,
             goodsStoreMap = sp.map(),
-            authorMap = sp.map()
+            authorMap = sp.map(),
+            donationRecordsMap = sp.map(),
+            voteRecordsMap = sp.map(),
+            rankingMaps = sp.map(),
+            ipAssetsCert= sp.map()
         )
 
     ##
@@ -946,7 +1132,7 @@ class  NftAuctionMarket(sp.Contract):
     ##
     ## any one bidding the goods with the english auction style
     ## note: if the buyer send the valid currentRSAPublicKey, the seller will delivery 
-    ## the source file without encrypted url.
+    ## the source file with encrypted url.
     ##
     @sp.entry_point     
     def englishBidding(self, _token_id, _currentRsaPublicKey):  
@@ -1052,6 +1238,52 @@ class  NftAuctionMarket(sp.Contract):
         ## currentRSAPublicKey,EncryptedSrcUrl reserved for the buyer to check
         goodsInfo.status = sp.variant('status', "Ended")
 
+
+    ##
+    ## ## updateSaleRankingMap
+    ##
+    ## update sale ranking map when closeAuctionWithDelivery
+    ## 
+    def updateSaleRankingMap(self, _token_id, volume, seller, buyer):
+        # set type, 
+        sp.set_type(_token_id, sp.TNat)
+        sp.set_type(volume, sp.TMutez)
+        sp.set_type(seller, sp.TAddress)
+        sp.set_type(buyer, sp.TAddress)   
+
+
+        #record sale information
+        ## if rankingMap of the token id exists
+        sp.if self.data.rankingMaps.contains(_token_id) :
+            self.data.rankingMaps[_token_id].volume += volume
+
+            ## set the seller count 
+            sp.if self.data.rankingMaps[_token_id].sellers.contains(seller) :
+                self.data.rankingMaps[_token_id].sellers[seller] += 1
+            sp.else :
+                self.data.rankingMaps[_token_id].sellers[seller] = 1
+
+
+            ## set the buyer count
+            sp.if self.data.rankingMaps[_token_id].buyers.contains(buyer) :
+                self.data.rankingMaps[_token_id].buyers[buyer] += 1
+            sp.else :
+                self.data.rankingMaps[_token_id].buyers[buyer] = 1            
+
+
+        ## if rankingMap of the token id does not exist
+        sp.else :
+            # construct the record
+            rankingMap = sp.record(
+                            # set the auction information
+                            volume = volume,
+                            sellers = sp.map(l = {seller : 1}, tkey = sp.TAddress, tvalue = sp.TNat),
+                            buyers = sp.map(l = {buyer : 1}, tkey = sp.TAddress, tvalue = sp.TNat),
+            ) 
+            ## set the map
+            self.data.rankingMaps[_token_id] = rankingMap
+
+
     ## ## closeAuctionWithDelivery
     ##
     ## After the stop time, the seller delivery the token and the source file to the latest bidder, and get the xtz
@@ -1090,8 +1322,13 @@ class  NftAuctionMarket(sp.Contract):
             ## 4.2.3 set EncryptedSrcUrl
             goodsInfo.EncryptedSrcUrl = _EncryptedSrcUrl
 
-            ## 4.2.4 should not delete the goods,because the buyer will get the EncryptedSrcUrl later.
+            ## 4.2.4 update sale ranking map
+            self.updateSaleRankingMap(_token_id, goodsInfo.currentPrice, goodsInfo.sellerAddress, goodsInfo.currentBidder.open_some())
+
+            ## 4.2.5 should not delete the goods,because the buyer will get the EncryptedSrcUrl later.
             self.resetGoodsAuctionInfo(_token_id)
+
+
 
 
         ## 4.1 no bidder
@@ -1140,8 +1377,240 @@ class  NftAuctionMarket(sp.Contract):
         self.fa2Transfer(self.data.nftContractAddress, sp.self_address, goodsInfo.sellerAddress,  _token_id, 1)
 
         # 6. delete the goods
-        del self.data.goodsStoreMap[_token_id]        
+        del self.data.goodsStoreMap[_token_id]  
+
+
+    ##
+    ## ## string_of_nat
+    ##
+    ## change nat to string
+    ## 
+    def string_of_nat(self, params):
+        c   = sp.map({x : str(x) for x in range(0, 10)})
+        x   = sp.local('x', params)
+        res = sp.local('res', [])
+        sp.if x.value == 0:
+            res.value.push('0')
+        sp.while 0 < x.value:
+            res.value.push(c[x.value % 10])
+            x.value //= 10
+        return sp.concat(res.value)
     
+
+    ##
+    ## ## sponsorDonation
+    ##
+    ## any one can sponsor a donation when the author is registered in the market.
+    ## 
+    @sp.entry_point     
+    def sponsorDonation(self, _token_id,_authorID, _endTime):
+        # 1. Initial the input parameters.
+        sp.set_type(_token_id, sp.TNat)
+        sp.set_type(_authorID, sp.TNat)
+        sp.set_type(_endTime, sp.TTimestamp)
+
+        # 2. judge the _authorID is in the authorMap
+        sp.verify(self.data.authorMap.contains(_authorID), "the author id does not exist!")
+        # judge _endTime is bigger than now
+        sp.verify(_endTime > sp.now, "the end time should be bigger than now!")
+        # _token_id 
+
+        # 4. save parameters.
+        ## construct donation record map
+        donationRecordMap = sp.record(
+                    authorID = _authorID,
+                    tokenID = _token_id,
+                    sponsorAddr = sp.sender,
+                    endTime = _endTime, 
+                    donationValue = sp.mutez(0),      
+                    withdrawableValue = sp.mutez(0),
+                    donatorMap = sp.map()     
+        )
+
+        # sp.len(self.data.donationRecordsMap) is the record no. of the filling record
+        self.data.donationRecordsMap[sp.len(self.data.donationRecordsMap)] = donationRecordMap
+
+
+    ##
+    ## ## donate
+    ##
+    ## any one can donate tezos to the sponsor who can be the author or others.
+    ## 
+    @sp.entry_point     
+    def donate(self, _recordNO, _authorID, _token_id):
+        # 1. Initial the input parameters.
+        sp.set_type(_recordNO, sp.TNat)
+        sp.set_type(_authorID, sp.TNat)
+        sp.set_type(_token_id, sp.TNat)
+
+        # 2. judge _recordNO is exist
+        sp.verify(self.data.donationRecordsMap.contains(_recordNO), "the donation _recordNO does not exist!")
+
+        # 3. judge _authorID,_token_id are same as the sponsor filled.
+        sp.verify(self.data.donationRecordsMap[_recordNO].authorID == _authorID,  "the _authorID is wrong, please make sure and try again!")
+        sp.verify(self.data.donationRecordsMap[_recordNO].tokenID == _token_id,  "the _token_id is wrong, please make sure and try again!")
+
+        # 4. judge now is smaller than or equal to the endtime.
+        sp.verify(sp.now <= self.data.donationRecordsMap[_recordNO].endTime, "now should be smaller than or equal to the end time!")
+
+        # 5. judge the donation value with this transation is bigger than 0.
+        sp.verify(sp.amount > sp.mutez(0), "the donation value should be bigger than 0!")
+
+        # 6. record the donator address, amount, produce the certification ID
+        donatorRecord = sp.record(
+                    donatorAddr = sp.sender,
+                    donatorValue = sp.amount,
+                    donatorTime = sp.now,
+                    # donationID：TEZOS-recordNO-authorID-tokenID-donatorAddr-donatorValue-donatorTime     
+                    # donationID = "TEZOS-"+self.string_of_nat(_recordNO)+"-"+self.string_of_nat(_authorID)+"-" \
+                    #              +self.string_of_nat(_token_id)+"-"+self.string_of_nat(sp.sender)+"-"+self.string_of_nat(sp.amount) \
+                    #              +"-"+self.string_of_nat(sp.level) 
+                    donationID = ""
+                    )
+
+        self.data.donationRecordsMap[_recordNO].donatorMap[sp.len(self.data.donationRecordsMap[_recordNO].donatorMap)] \
+            = donatorRecord
+
+        # 7. update the works' donationValue 
+        self.data.donationRecordsMap[_recordNO].donationValue += sp.amount
+        self.data.donationRecordsMap[_recordNO].withdrawableValue += sp.amount
+
+
+
+
+    ##
+    ## ## withdrawDonation
+    ##
+    ## the sponsor can withdraw the donation.
+    ## 
+    @sp.entry_point     
+    def withdrawDonation(self, _recordNO, _authorID, _token_id):
+        # 1. Initial the input parameters.
+        sp.set_type(_recordNO, sp.TNat)
+        sp.set_type(_authorID, sp.TNat)
+        sp.set_type(_token_id, sp.TNat)
+
+        # 2. judge _recordNO is exist
+        sp.verify(self.data.donationRecordsMap.contains(_recordNO), "the donation _recordNO does not exist!")
+
+        # 3. judge _authorID,_token_id are same as the sponsor filled.
+        sp.verify(self.data.donationRecordsMap[_recordNO].authorID == _authorID,  "the _authorID is wrong, please make sure and try again!")
+        sp.verify(self.data.donationRecordsMap[_recordNO].tokenID == _token_id,  "the _token_id is wrong, please make sure and try again!")
+       
+        # 4. judge now is smaller than or equal to the endtime.
+        sp.verify(sp.now > self.data.donationRecordsMap[_recordNO].endTime, "now should be bigger than the end time when withdraw!")
+
+        # 5. judge the sender is the sponor
+        sp.verify(sp.sender == self.data.donationRecordsMap[_recordNO].sponsorAddr, "the sender must be the sponor!")
+        
+        # 6. judge the donation value with this transation is bigger than 0.
+        sp.verify(self.data.donationRecordsMap[_recordNO].withdrawableValue > sp.mutez(0), "the donation value should be bigger than 0 when withdraw!")
+
+        # 7. judge the balance of the contract must be bigger than or equal to the withdrawableValue.
+        sp.verify(sp.balance >= self.data.donationRecordsMap[_recordNO].withdrawableValue, 
+                    "the balance of the contract must be bigger than or equal to the withdrawableValue!")
+
+        # 8. transfer tezos to the sponsor
+        sp.send(sp.sender, self.data.donationRecordsMap[_recordNO].withdrawableValue)          
+
+        # 9. set withdrawableValue to 0.        
+        self.data.donationRecordsMap[_recordNO].withdrawableValue = sp.mutez(0)            
+
+
+    ##
+    ## ## sponsorVoting
+    ##
+    ## any one can sponsor a voting in the future between [_beginTime:_endTime].
+    ## 
+    @sp.entry_point     
+    def sponsorVoting(self, _token_id,_authorID, _beginTime, _endTime):
+        # 1. Initial the input parameters.
+        sp.set_type(_token_id, sp.TNat)
+        sp.set_type(_authorID, sp.TNat)
+        sp.set_type(_beginTime, sp.TTimestamp)        
+        sp.set_type(_endTime, sp.TTimestamp)
+
+        # 2. judge the _authorID is in the authorMap
+        sp.verify(self.data.authorMap.contains(_authorID), "the author id does not exist!")
+
+        # 3.judge _beginTime < _endTime        
+        sp.verify(_beginTime < _endTime, "the voting can only be sponsored in the future between [_beginTime:_endTime]!")        
+        # judge _beginTime is <= now 
+        sp.verify(_beginTime <= sp.now, "the voting can only be valid from now on!")        
+
+        # 4. record this voting parameters.
+        recordNO = sp.len(self.data.voteRecordsMap)
+        ## construct vote record map of the token
+        voteRecordsMap = sp.record(
+                        authorID = _authorID,
+                        tokenID = _token_id,
+                        beginTime = _beginTime,
+                        endTime = _endTime,
+                        totalNum  = 0,
+                        votersMap =  sp.map() 
+        )
+
+        #set the map
+        self.data.voteRecordsMap[recordNO] = voteRecordsMap
+
+    ##
+    ## ## vote
+    ##
+    ## any one can sponsor a voting in the future between [_beginTime:_endTime].
+    ## 
+    @sp.entry_point     
+    def vote(self, _recordNO, _authorID, _token_id):
+        # 1. Initial the input parameters.
+        sp.set_type(_recordNO, sp.TNat)
+        sp.set_type(_authorID, sp.TNat)
+        sp.set_type(_token_id, sp.TNat)
+
+        # 2. judge _recordNO is exist
+        sp.verify(self.data.voteRecordsMap.contains(_recordNO), "the donation _recordNO does not exist!")
+
+        # 3. judge _authorID,_token_id are same as the sponsor filled.
+        sp.verify(self.data.voteRecordsMap[_recordNO].authorID == _authorID,  "the _authorID is wrong, please make sure and try again!")
+        sp.verify(self.data.voteRecordsMap[_recordNO].tokenID == _token_id,  "the _token_id is wrong, please make sure and try again!")
+
+        # 4. judge now is between [_beginTime:_endTime].
+        sp.verify(sp.now >= self.data.voteRecordsMap[_recordNO].beginTime, "now should be bigger than or equal to the begin time!")
+        sp.verify(sp.now <= self.data.voteRecordsMap[_recordNO].endTime, "now should be smaller than or equal to the end time!")
+
+        # 5. update totalNum and the voter information
+        self.data.voteRecordsMap[_recordNO].totalNum += 1
+
+        # 6. judge the voter map is empty or not
+        sp.if self.data.voteRecordsMap[_recordNO].votersMap.contains(sp.sender) :
+            self.data.voteRecordsMap[_recordNO].votersMap[sp.sender] += 1
+        sp.else :
+            self.data.voteRecordsMap[_recordNO].votersMap[sp.sender] = 1
+
+
+    ##
+    ## ## updateIPAssetsCert
+    ##
+    ## administrater can update DCI certification to NFT 
+    ## 
+    @sp.entry_point     
+    def updateIPAssetsCert(self, _token_id, _params):
+        # 1. Initial the input parameter types
+        sp.set_type(_token_id, sp.TNat)
+        sp.set_type(_params, sp.TRecord(
+                        DCI =   sp.TString,
+                        registerID = sp.TString,
+                        worksName = sp.TString,
+                        worksType = sp.TString,
+                        authorName = sp.TString,
+                        finishedDate = sp.TString,
+                        firstPublishedDate = sp.TString,
+                        registeredDate = sp.TString) )
+
+        # 2.only administrator can update DCI certification to NFT
+        sp.verify(sp.sender == self.data.administrator,"update DCI certification to NFT !")  
+
+        # 3. update
+        self.data.ipAssetsCert[_token_id] = _params
+
 ## ## 
 ##
 ## ### Viewer Contract
@@ -1298,7 +1767,7 @@ def add_test(config, is_default = True):
                     admin = admin.address)
             scenario += nftContract        
 
-            scenario.h3("The administrator mints 0/1/2 MOZ@NFT TOKEN  to bob.")
+            scenario.h3("The administrator mints 0/1/2/3 MOZ@NFT TOKEN  to bob.")
             mozNFTMeta = FA2.make_metadata(
                 name = "The MOZIK Non-Fungible Token 1",
                 decimals = 0,
@@ -1327,7 +1796,51 @@ def add_test(config, is_default = True):
                                                )   
                                     ])                                         
             nftContract.transfer( transferParam ).run(sender = bob)
-                                                                                                                        
+
+            # approve Right
+            nftContract.mint(address = bob.address,
+                                amount = 1,
+                                metadata = mozNFTMeta,
+                                token_id = 4).run(sender = admin) 
+            nftContract.mint(address = bob.address,
+                                amount = 1,
+                                metadata = mozNFTMeta,
+                                token_id = 5).run(sender = admin)
+                                
+            scenario.h3("approve token id 4 Recording Right to  alice with other user")
+            nftContract.transferRecordingRight(token_id = 4 , address = alice.address).run(sender = alice, valid = False)
+
+            scenario.h3("approve token id 4 Recording Right to  alice")
+            nftContract.transferRecordingRight(token_id = 4 , address = alice.address).run(sender = bob)
+
+
+            scenario.h3("approve token id 4 Propagating Right to  duncan")
+            nftContract.transferPropagatingRight(token_id = 4 , address = duncan.address).run(sender = admin)
+            
+            scenario.h3("approve token id 4 Other Right to  duncan")
+            nftContract.transferOtherRightsRight(token_id = 4 , address = duncan.address).run(sender = bob)
+
+            scenario.h3("approve token id 5 All Right to  alice")
+            nftContract.transferAllRight(token_id = 5 , recordingRightAddress = alice.address, propagatingRightAddress = alice.address, otherRightsAddress = alice.address).run(sender = bob)
+
+            scenario.h3("transfer token 5 from bob to duncan without all right")
+            transferParam = sp.list([ sp.record(from_ =  bob.address, 
+                                      txs = sp.list([sp.record(to_ = duncan.address, token_id = 5, amount = 1) ])  
+                                               )   
+                                    ])                                         
+            nftContract.transfer( transferParam ).run(sender = bob, valid = False)
+
+            scenario.h3("approve token id 5 All Right to  bob")
+            nftContract.transferAllRight(token_id = 5 , recordingRightAddress = bob.address, propagatingRightAddress = bob.address, otherRightsAddress = bob.address).run(sender = bob)
+            
+            scenario.h3("transfer token 5 from bob to duncan with all rights")
+            transferParam = sp.list([ sp.record(from_ =  bob.address, 
+                                      txs = sp.list([sp.record(to_ = duncan.address, token_id = 5, amount = 1) ])  
+                                               )   
+                                    ])                                         
+            nftContract.transfer( transferParam ).run(sender = bob)
+
+
             scenario.h2("Change token metadata")    
             mozTestMeta = FA2.make_metadata(
                 name = "test The MOZIK Non-Fungible Token ",
@@ -1343,7 +1856,9 @@ def add_test(config, is_default = True):
                     metadata = mozTestMeta).run(sender = alice, valid = False)                                
             # expect invalid because of token_id not exist
             nftContract.set_token_metadata( token_id = 100,
-                    metadata = mozTestMeta).run(sender = admin, valid = False)                                     
+                    metadata = mozTestMeta).run(sender = admin, valid = False)   
+
+   
 
             # begin Author Management with NftAuctionMarket contract
             scenario.h1("Begin Author Management")   
@@ -1363,7 +1878,7 @@ def add_test(config, is_default = True):
             ## addAuthor success
             nftAuctionContract.addAuthor(param).run(sender = admin)
 
-            ### addAuthor fail
+            ## addAuthor fail
             nftAuctionContract.addAuthor(param).run(sender = alice, valid = False)
 
             ## update the author information
@@ -1387,6 +1902,61 @@ def add_test(config, is_default = True):
             ### update failed
             authorID = 100
             nftAuctionContract.updateAuthor(_authorID = authorID, _param = param).run(sender = admin, valid = False)
+            
+            # begin IP assets Register
+            scenario.h1("Begin IP assets Register")   
+
+            # update IP Assets certification succ
+            scenario.h2("Begin IP assets Register 0/1/2/3, SUCC")   
+            params = sp.record(DCI  = "C20190000000000000085961800106805",
+                              registerID = "国作登字-2019-I-A0106805",
+                              worksName = "Concert and VIP Experience & Pre-release song: Everything’s Gon Be Alright",
+                              worksType = "类似摄制电影的方法创作作品",
+                              authorName = "Joseph Wooten",
+                              finishedDate = "2019-4-16",
+                              firstPublishedDate = "2019-4-17",
+                              registeredDate = "2019-4-18")
+            nftAuctionContract.updateIPAssetsCert(_token_id = 0, _params=params).run(sender = admin, valid = True)
+            nftAuctionContract.updateIPAssetsCert(_token_id = 1, _params=params).run(sender = admin, valid = True)
+            nftAuctionContract.updateIPAssetsCert(_token_id = 2, _params=params).run(sender = admin, valid = True)
+            nftAuctionContract.updateIPAssetsCert(_token_id = 3, _params=params).run(sender = admin, valid = True)
+            # update IP Assets certification FAIL
+            scenario.h2("Begin IP assets Register, FAIL")  
+            nftAuctionContract.updateIPAssetsCert(_token_id = 0, _params=params).run(sender = alice, valid = False)
+
+            # Vote for token 1
+            scenario.h1("Begin Vote for token")   
+
+            # sponsor voting for token 1 which owned by bob"
+            scenario.h2("Begin sponsor voting for token 1 which owned by bob")   
+            nftAuctionContract.sponsorVoting(_token_id = 1, _authorID = 0, _beginTime = sp.now, _endTime = sp.now.add_seconds(60)).run(sender = admin)
+            # alice votes for token 1 twice which owned by bob"
+            scenario.h2("Alice votes twice for token 1 ")   
+            nftAuctionContract.vote(_recordNO = 0, _authorID = 0, _token_id = 1).run(sender = alice)
+            nftAuctionContract.vote(_recordNO = 0, _authorID = 0, _token_id = 1).run(sender = alice)
+            scenario.h2("admin votes once  for token 1 ")               
+            nftAuctionContract.vote(_recordNO = 0, _authorID = 0, _token_id = 1).run(sender = duncan)
+            scenario.verify(nftAuctionContract.data.voteRecordsMap[0].totalNum == 3)
+            scenario.verify(nftAuctionContract.data.voteRecordsMap[0].votersMap[alice.address] == 2)
+            
+            # Vote for token 1
+            scenario.h1("Begin Donation for token")   
+            scenario.h2("Bob sponsor a donation for token 0")   
+            nftAuctionContract.sponsorDonation( _token_id = 0,_authorID = 0, _endTime = sp.now.add_seconds(60)).run(sender = bob)
+            scenario.h2("Bob donates 1 xtz for token 0")   
+            nftAuctionContract.donate(_recordNO = 0, _authorID = 0, _token_id = 0).run(sender = duncan,amount = sp.mutez(1000000))
+            scenario.h2("alice donates 1 xtz for token 0")   
+            nftAuctionContract.donate(_recordNO = 0, _authorID = 0, _token_id = 0).run(sender = alice,amount = sp.mutez(1000000))
+            scenario.h2("duncan donates 1 xtz for token 0")   
+            nftAuctionContract.donate(_recordNO = 0, _authorID = 0, _token_id = 0).run(sender = duncan,amount = sp.mutez(1000000))
+            scenario.h2("alice donates 1 xtz for token 0 once more")   
+            nftAuctionContract.donate(_recordNO = 0, _authorID = 0, _token_id = 0).run(sender = alice,amount = sp.mutez(1000000))     
+            scenario.verify(nftAuctionContract.data.donationRecordsMap[0].withdrawableValue == sp.mutez(4000000))       
+
+            scenario.h2("bob withdraw the docation for token 0")   
+            nftAuctionContract.withdrawDonation(_recordNO = 0, _authorID = 0, _token_id = 0).run(sender = bob,now = sp.now.add_seconds(120))
+
+
 
             # begin auction Management with NftAuctionMarket contract
             scenario.h1("Begin auction Management")   
@@ -1934,3 +2504,4 @@ if "templates" not in __name__:
     sp.add_compilation_target("FA2_MOZ_NFT", FA2(config = environment_config(),
                               metadata = sp.utils.metadata_of_url("ipfs://Qmf6tjsd7kwHESMJhCLYNHF7j6AdGNmtnBrcVC4aS87YwL"),
                               admin = sp.address("tz1c4Zma1UmkEfwmEsqYdMcVpFauhNCeKY3U")))
+							  
